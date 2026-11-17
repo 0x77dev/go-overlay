@@ -15,6 +15,7 @@
 in {
   # Build a single-module Go application from a govendor.toml manifest.
   # Defaults to src + "/govendor.toml" — run `govendor` to generate it.
+  # Builds that share a manifest and go can share one mkVendorEnv result as vendorEnv.
   # For projects using `go mod vendor`, use buildGoVendoredApplication instead.
   buildGoApplication = {
     pname,
@@ -22,6 +23,7 @@ in {
     src,
     modules ? src + "/govendor.toml", # Path to govendor.toml manifest
     go,
+    vendorEnv ? null, # mkVendorEnv result for modules and go; assembled here when null
     subPackages ? ["."],
     ldflags ? [],
     tags ? [],
@@ -55,9 +57,20 @@ in {
               }
         '';
 
-    vendorEnv = mkVendorEnv {
-      inherit go manifest src localReplaces netrcFile GOPRIVATE GONOSUMDB GONOPROXY;
-    };
+    # localReplaces and the module-fetching options only shape the vendor
+    # environment, so beside a prebuilt one they are refused rather than ignored.
+    hasVendorOptions =
+      localReplaces != {} || netrcFile != null || GOPRIVATE != "" || GONOSUMDB != "" || GONOPROXY != "";
+
+    vendor =
+      if vendorEnv == null
+      then
+        mkVendorEnv {
+          inherit go manifest src localReplaces netrcFile GOPRIVATE GONOSUMDB GONOPROXY;
+        }
+      else
+        assert !hasVendorOptions
+        || throw "go-overlay: vendorEnv cannot be combined with localReplaces, netrcFile, GOPRIVATE, GONOSUMDB or GONOPROXY; pass them to mkVendorEnv instead"; vendorEnv;
 
     configurePhase =
       attrs.configurePhase or ''
@@ -68,9 +81,9 @@ in {
 
         rm -rf vendor
         ${
-          if vendorEnv.useSymlinks
-          then "cp --no-preserve=mode -rs ${vendorEnv} vendor"
-          else "cp -r --reflink=auto ${vendorEnv} vendor"
+          if vendor.useSymlinks
+          then "cp --no-preserve=mode -rs ${vendor} vendor"
+          else "cp -r --reflink=auto ${vendor} vendor"
         }
         chmod -R u+w vendor
 
@@ -86,17 +99,20 @@ in {
     hostTools = map (pkg:
       mkHostTool {
         inherit src go pkg;
-        inherit (vendorEnv) useSymlinks;
-        vendorEnv = vendorEnv;
+        inherit (vendor) useSymlinks;
+        vendorEnv = vendor;
         version = manifest.tool.${pkg}.version;
         GOWORK = "off";
       })
     (builtins.attrNames (manifest.tool or {}));
 
-    passthru = {inherit go vendorEnv hostTools;};
+    passthru = {
+      inherit go hostTools;
+      vendorEnv = vendor;
+    };
   in
     stdenv.mkDerivation (
-      builtins.removeAttrs attrs commonRemovedAttrs
+      builtins.removeAttrs attrs (commonRemovedAttrs ++ ["vendorEnv"])
       // {inherit pname version src;}
       // mkCommonAttrs {
         inherit attrs go allowGoReference ldflags tags GOOS GOARCH CGO_ENABLED hostTools;

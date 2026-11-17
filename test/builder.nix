@@ -283,6 +283,26 @@
           ''}
         ''
       ));
+
+  # The host-tool-app fixture and the vendor environment the builder would
+  # assemble for it, shared by the vendorEnv checks below.
+  vendorEnvApp = let
+    src = ./fixtures/host-tool-app;
+    go = go-bin.fromGoMod (src + "/go.mod");
+  in {
+    inherit src go;
+    vendorEnv = pkgs.mkVendorEnv {
+      inherit go src;
+      manifest = builtins.fromTOML (builtins.readFile (src + "/govendor.toml"));
+    };
+    build = extra:
+      pkgs.buildGoApplication ({
+          pname = "host-tool-app";
+          version = "0.1.0";
+          inherit src go;
+        }
+        // extra);
+  };
 in {
   # excludedPackages - no exclusions returns basePackages unchanged
   testPackages-no-exclusions = testTestPackages "testPackages-no-exclusions" {
@@ -518,6 +538,43 @@ in {
       };
   in
     assertHostToolDrvPathStable "hostTool-workspace-drvpath-stable-across-unrelated-changes" mkDrv baseSrc touchedSrc;
+
+  # Builds of one manifest and go may share one mkVendorEnv result as vendorEnv.
+  # An environment equal to the one the builder would assemble leaves the
+  # program, its vendor environment and its host tools unchanged.
+  vendorEnv-application-shared-unchanged = let
+    inherit (vendorEnvApp) vendorEnv build;
+    drvPaths = drv: [drv.drvPath drv.vendorEnv.drvPath (builtins.head drv.hostTools).drvPath];
+  in
+    assertEq "vendorEnv-application-shared-unchanged" (drvPaths (build {})) (drvPaths (build {inherit vendorEnv;}));
+
+  # The given environment is the one the program, its host tools and passthru
+  # use, not an argument the builder ignores and replaces with its own.
+  vendorEnv-application-uses-given-environment = let
+    vendorEnv = pkgs.runCommand "given-vendor-env" {passthru.useSymlinks = true;} "mkdir $out";
+    drv = vendorEnvApp.build {inherit vendorEnv;};
+    # hasInfix matches a regular expression, which cannot carry the store path's context.
+    uses = text: pkgs.lib.hasInfix (builtins.unsafeDiscardStringContext "${vendorEnv}") text;
+  in
+    assertEq "vendorEnv-application-uses-given-environment" [true true true] [
+      (drv.vendorEnv.outPath == vendorEnv.outPath)
+      (uses drv.configurePhase)
+      (uses (builtins.head drv.hostTools).configurePhase)
+    ];
+
+  # The options that only shape a vendor environment cannot change a prebuilt one,
+  # so the builder refuses them beside it.
+  vendorEnv-application-refuses-vendor-options = let
+    inherit (vendorEnvApp) src vendorEnv build;
+    refused = options: !(builtins.tryEval (build ({inherit vendorEnv;} // options)).drvPath).success;
+  in
+    assertEq "vendorEnv-application-refuses-vendor-options" [true true true true true] (map refused [
+      {localReplaces."example.com/local" = src;}
+      {netrcFile = src + "/go.mod";}
+      {GOPRIVATE = "example.com";}
+      {GONOSUMDB = "example.com";}
+      {GONOPROXY = "example.com";}
+    ]);
 
   mkModuleCopyCommands-works-with-tildes-symlink = let
     inherit (import ../builder/modules-txt.nix {inherit (pkgs) lib;}) mkAnnotation mkRemoteModuleEntry mkRemoteReplaceTrailers isUnusedReplace;

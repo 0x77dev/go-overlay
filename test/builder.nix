@@ -282,6 +282,50 @@
             [ "$(cat "$internal/sibling")" = sibling ] || fail "intermediate symlink target's sibling lost"
           ''}
         ''
+      ))
+    // pkgs.lib.genAttrs [
+      "mkModuleCopyCommands-deepest-ancestor-copy"
+      "mkModuleCopyCommands-deepest-ancestor-symlink"
+    ] (name: let
+      # The child's parent is its deepest declared ancestor, example.com/outer/middle,
+      # whose source links internal to a directory of its own; no module declares
+      # the internal path. The outer module has no internal, as a module zip leaves
+      # nested modules out, so resolving the link against any other ancestor, or
+      # against none, loses the linked directory's files or writes into the store.
+      target = pkgs.runCommand "deepest-ancestor-target" {} ''
+        mkdir -p $out/api
+        echo sibling > $out/sibling
+        echo placeholder > $out/api/placeholder
+      '';
+      middle = pkgs.runCommand "deepest-ancestor-middle" {} ''
+        mkdir -p $out
+        echo middle > $out/middle
+        ln -s ${target} $out/internal
+      '';
+      outer = pkgs.runCommand "deepest-ancestor-outer" {} ''
+        mkdir -p $out
+        echo outer > $out/outer
+      '';
+    in
+      pkgs.runCommand "test-${name}" {} (
+        "mkdir -p $out\n"
+        + mkModuleCopyCommands {
+          sources = {
+            "example.com/outer" = outer;
+            "example.com/outer/middle" = middle;
+            "example.com/outer/middle/internal/api" = nestedChild;
+          };
+          packages = {"example.com/outer/middle/internal/api" = ["example.com/outer/middle/internal/api"];};
+          useSymlinks = pkgs.lib.hasSuffix "-symlink" name;
+        }
+        + ''
+          fail() { echo "Test '${name}' failed: $*"; exit 1; }
+          middle="$out/example.com/outer/middle"
+          [ -f "$out/example.com/outer/outer" ] && [ -f "$middle/middle" ] || fail "ancestor module files lost"
+          [ -f "$middle/internal/api/child" ] || fail "nested child missing"
+          [ ! -e "$middle/internal/api/placeholder" ] || fail "parent placeholder leaked into child"
+          [ "$(cat "$middle/internal/sibling")" = sibling ] || fail "internal resolved against a module other than the child's deepest declared ancestor"
+        ''
       ));
 in {
   # excludedPackages - no exclusions returns basePackages unchanged
@@ -596,5 +640,7 @@ in {
     mkModuleCopyCommands-intermediate-dangling-symlink
     mkModuleCopyCommands-intermediate-ancestor-copy
     mkModuleCopyCommands-intermediate-ancestor-symlink
+    mkModuleCopyCommands-deepest-ancestor-copy
+    mkModuleCopyCommands-deepest-ancestor-symlink
     ;
 }

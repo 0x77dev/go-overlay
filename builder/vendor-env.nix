@@ -35,14 +35,27 @@
     packages ? {},
     useSymlinks ? true,
   }: let
-    # attrNames orders parents before children; reversing it selects the deepest
-    # declared ancestor first when looking up a child's parent module.
+    # attrNames orders parents before children, so a parent's files are in
+    # place before its children merge into its directories.
     pkgPaths = builtins.attrNames sources;
-    reversedPaths = lib.reverseList pkgPaths;
     copyFlags =
       if useSymlinks
       then "-s"
       else "--reflink=auto";
+
+    # Each module path's prefixes that end at a path separator, deepest first:
+    # example.com/a/b has example.com/a and example.com. The lookups below walk
+    # these, so each costs the depth of one path rather than the whole manifest.
+    ancestors = builtins.mapAttrs (goPackagePath: _: let
+      parts = lib.splitString "/" goPackagePath;
+      depth = builtins.length parts;
+    in
+      builtins.genList (n: lib.concatStringsSep "/" (lib.take (depth - 1 - n) parts)) (depth - 1))
+    sources;
+
+    # Every prefix of every module path: a module has children when its path is
+    # one of them.
+    enclosing = lib.genAttrs (builtins.concatLists (builtins.attrValues ancestors)) (_: null);
 
     clearParentPackages = packagePaths:
       concatMapStringsSep "\n" (package: ''
@@ -80,8 +93,9 @@
       goPackagePath: let
         modSrc = sources.${goPackagePath};
         pkgPath = escapeShellArg goPackagePath;
-        hasChildren = builtins.any (lib.hasPrefix "${goPackagePath}/") pkgPaths;
-        parentModule = lib.findFirst (path: lib.hasPrefix "${path}/" goPackagePath) null reversedPaths;
+        hasChildren = enclosing ? ${goPackagePath};
+        # The deepest declared ancestor; a path between the two need not be a module.
+        parentModule = lib.findFirst (path: sources ? ${path}) null ancestors.${goPackagePath};
         modulePackages = packages.${goPackagePath} or [];
       in ''
         pkg_path=${pkgPath}

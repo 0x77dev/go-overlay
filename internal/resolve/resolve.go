@@ -107,7 +107,7 @@ func (r *Resolver) resolveModule(ctx context.Context, manifest progress.Manifest
 		return nil, err
 	}
 
-	localModules, err := r.resolveLocalModules(ctx, localModulesOf(goMod, goMod.Dir, goMod.Requires), pkgsByMod)
+	localModules, err := r.resolveLocalModules(ctx, localModulesOf(goMod, goMod.Dir, goMod.Requires), goMod.Dir, pkgsByMod)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (r *Resolver) resolveWorkspace(ctx context.Context, manifest progress.Manif
 	for _, m := range members {
 		memberLocals = append(memberLocals, localModulesOf(m, m.Dir, m.Requires)...)
 	}
-	localDeps, err := r.resolveLocalModules(ctx, memberLocals, pkgsByMod)
+	localDeps, err := r.resolveLocalModules(ctx, memberLocals, goWork.Dir, pkgsByMod)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func (r *Resolver) resolveWorkspace(ctx context.Context, manifest progress.Manif
 	memberVersions := workspaceVersions(members, vendored)
 
 	workspaceLocalDeps, err := r.resolveLocalModules(ctx,
-		localModulesOf(goWork, goWork.Dir, memberVersions), pkgsByMod)
+		localModulesOf(goWork, goWork.Dir, memberVersions), goWork.Dir, pkgsByMod)
 	if err != nil {
 		return nil, err
 	}
@@ -491,8 +491,9 @@ func (r *Resolver) resolveRemoteModule(m modulestxt.Module, scheduler *hashSched
 // resolveLocalModules hashes and builds ModuleConfig entries for a set of
 // local replace directives. Callers supply the base directory and version
 // for each, so go.mod-level and go.work-level replacements share one code
-// path instead of two near-identical copies.
-func (r *Resolver) resolveLocalModules(ctx context.Context, locals []localModule, pkgsByMod map[string][]string) ([]mod.ModuleConfig, error) {
+// path instead of two near-identical copies. manifestDir is the directory
+// the manifest is written to; it is shared by every directive in one resolve.
+func (r *Resolver) resolveLocalModules(ctx context.Context, locals []localModule, manifestDir string, pkgsByMod map[string][]string) ([]mod.ModuleConfig, error) {
 	if len(locals) == 0 {
 		return nil, nil
 	}
@@ -519,7 +520,7 @@ func (r *Resolver) resolveLocalModules(ctx context.Context, locals []localModule
 					errs[i] = fmt.Errorf("panic resolving local module %s: %v", lm.repl.OldPath, p)
 				}
 			}()
-			results[i], errs[i] = r.resolveLocalModule(ctx, lm, pkgsByMod)
+			results[i], errs[i] = r.resolveLocalModule(ctx, lm, manifestDir, pkgsByMod)
 			return nil
 		})
 	}

@@ -497,11 +497,11 @@ func TestSharedHashPoolSupportsConcurrentResolveLocalModulesCalls(t *testing.T) 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		depsA, errA = r.resolveLocalModules(context.Background(), localsA, nil)
+		depsA, errA = r.resolveLocalModules(context.Background(), localsA, dirA, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		depsB, errB = r.resolveLocalModules(context.Background(), localsB, nil)
+		depsB, errB = r.resolveLocalModules(context.Background(), localsB, dirB, nil)
 	}()
 	wg.Wait()
 
@@ -511,6 +511,75 @@ func TestSharedHashPoolSupportsConcurrentResolveLocalModulesCalls(t *testing.T) 
 	require.Len(t, depsB, 1, "call B must see only its own result, not tasks the shared pool ran for call A")
 	assert.Equal(t, "example.com/a", depsA[0].Path)
 	assert.Equal(t, "example.com/b", depsB[0].Path)
+}
+
+func TestResolveLocalReplacementOmitsHashWhenItContainsTheManifest(t *testing.T) {
+	// manifest and module are directories under a temp dir. They are equal
+	// when the manifest belongs to a go.mod, and differ when it belongs to a
+	// go.work in manifest that uses module as a member.
+	tests := []struct {
+		name      string
+		manifest  string
+		module    string
+		localPath string
+		wantHash  string
+	}{
+		{name: "ParentOfModule", manifest: "tool", module: "tool", localPath: "../"},
+		{name: "ModuleDirectory", manifest: "tool", module: "tool", localPath: "./"},
+		{name: "WorkspaceRootInsideReplacement", manifest: "lib/ws", module: "m", localPath: "../lib"},
+		{name: "MemberInsideReplacementOnly", manifest: "ws", module: "lib/m", localPath: "../", wantHash: "sha256-fixed"},
+		{name: "SiblingOfModule", manifest: "tool", module: "tool", localPath: "../other", wantHash: "sha256-fixed"},
+		{name: "SharedNamePrefix", manifest: "bc", module: "bc", localPath: "../b", wantHash: "sha256-fixed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			goModPath := writeTestFile(t, dir, tt.module+"/go.mod", fmt.Sprintf(`
+module example.com/module
+
+go 1.25.4
+
+require example.com/target v0.0.0
+
+replace example.com/target => %s
+`, tt.localPath))
+
+			exec := &fakeExecutor{
+				responses: map[string]string{
+					"go mod vendor":  "# example.com/target => " + tt.localPath + "\n## explicit; go 1.25.4\nexample.com/target",
+					"go work vendor": "## workspace\n# example.com/target => " + tt.localPath + "\n## explicit; go 1.25.4\nexample.com/target",
+					"go mod":         "",
+					"git ls-files":   "go.mod",
+				},
+			}
+			r := New(exec, WithHasher(&countingHasher{hash: "sha256-fixed"}))
+
+			var deps []mod.ModuleConfig
+			if tt.manifest == tt.module {
+				goMod, err := mod.ParseGoModFile(goModPath)
+				require.NoError(t, err)
+				deps, err = r.ResolveModule(context.Background(), goMod, nil)
+				require.NoError(t, err)
+			} else {
+				use, err := filepath.Rel(tt.manifest, tt.module)
+				require.NoError(t, err)
+				goWorkPath := writeTestFile(t, dir, tt.manifest+"/go.work", "go 1.25.4\n\nuse "+filepath.ToSlash(use)+"\n")
+
+				goWork, err := mod.ParseGoWorkFile(goWorkPath)
+				require.NoError(t, err)
+				members, err := goWork.ParseMembers()
+				require.NoError(t, err)
+				deps, err = r.ResolveWorkspace(context.Background(), goWork, members, nil)
+				require.NoError(t, err)
+			}
+			require.Len(t, deps, 1)
+
+			assert.Equal(t, "example.com/target", deps[0].Path)
+			assert.Equal(t, tt.localPath, deps[0].Local)
+			assert.Equal(t, tt.wantHash, deps[0].Hash)
+		})
+	}
 }
 
 func TestResolveModuleWithRemoteReplacement(t *testing.T) {

@@ -57,20 +57,18 @@ in {
               }
         '';
 
-    # localReplaces and the module-fetching options only shape the vendor
-    # environment, so beside a prebuilt one they are refused rather than ignored.
-    hasVendorOptions =
-      localReplaces != {} || netrcFile != null || GOPRIVATE != "" || GONOSUMDB != "" || GONOPROXY != "";
+    # These options only shape the vendor environment. Ignoring one beside a
+    # prebuilt environment would build something other than what was asked
+    # for, so one set to anything but its default of {}, null or "" is refused.
+    vendorOptions = {inherit localReplaces netrcFile GOPRIVATE GONOSUMDB GONOPROXY;};
+    refusedOptions = builtins.attrNames (lib.filterAttrs (_: value: !builtins.elem value [{} null ""]) vendorOptions);
 
     vendor =
       if vendorEnv == null
-      then
-        mkVendorEnv {
-          inherit go manifest src localReplaces netrcFile GOPRIVATE GONOSUMDB GONOPROXY;
-        }
-      else
-        assert !hasVendorOptions
-        || throw "go-overlay: vendorEnv cannot be combined with localReplaces, netrcFile, GOPRIVATE, GONOSUMDB or GONOPROXY; pass them to mkVendorEnv instead"; vendorEnv;
+      then mkVendorEnv ({inherit go manifest src;} // vendorOptions)
+      else if refusedOptions == []
+      then vendorEnv
+      else throw "go-overlay: vendorEnv cannot be combined with ${lib.concatStringsSep ", " refusedOptions}; pass them to mkVendorEnv instead";
 
     configurePhase =
       attrs.configurePhase or ''
@@ -112,7 +110,7 @@ in {
     };
   in
     stdenv.mkDerivation (
-      builtins.removeAttrs attrs (commonRemovedAttrs ++ ["vendorEnv"])
+      builtins.removeAttrs attrs commonRemovedAttrs
       // {inherit pname version src;}
       // mkCommonAttrs {
         inherit attrs go allowGoReference ldflags tags GOOS GOARCH CGO_ENABLED hostTools;

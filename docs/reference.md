@@ -317,7 +317,9 @@ in {
 }
 ```
 
-A build given `vendorEnv` refuses `localReplaces`, `netrcFile`, `GOPRIVATE`, `GONOSUMDB` and `GONOPROXY`, because they only shape the environment. Pass them to `mkVendorEnv` instead.
+A build's environment is its `vendorEnv` attribute, so a second build can also take the first one's: `vendorEnv = api.vendorEnv`.
+
+A build given `vendorEnv` refuses `localReplaces`, `netrcFile`, `GOPRIVATE`, `GONOSUMDB` and `GONOPROXY` set to anything but their defaults, because they only shape the environment. Pass them to `mkVendorEnv` instead.
 
 ## Go Module Tool Directives
 

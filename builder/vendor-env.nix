@@ -43,19 +43,16 @@
       then "-s"
       else "--reflink=auto";
 
-    # Each module path's prefixes that end at a path separator, deepest first:
-    # example.com/a/b has example.com/a and example.com. The lookups below walk
-    # these, so each costs the depth of one path rather than the whole manifest.
-    ancestors = builtins.mapAttrs (goPackagePath: _: let
+    # A module path's proper prefixes, deepest first: example.com/a/b gives
+    # example.com/a, then example.com. Walking them costs the depth of one
+    # path; scanning every module path would cost the size of the manifest.
+    prefixesOf = goPackagePath: let
       parts = lib.splitString "/" goPackagePath;
-      depth = builtins.length parts;
     in
-      builtins.genList (n: lib.concatStringsSep "/" (lib.take (depth - 1 - n) parts)) (depth - 1))
-    sources;
+      map (n: lib.concatStringsSep "/" (lib.take n parts)) (lib.reverseList (lib.range 1 (builtins.length parts - 1)));
 
-    # Every prefix of every module path: a module has children when its path is
-    # one of them.
-    enclosing = lib.genAttrs (builtins.concatLists (builtins.attrValues ancestors)) (_: null);
+    # Every proper prefix of every module path; a module with children is one of them.
+    allPrefixes = lib.genAttrs (builtins.concatMap prefixesOf pkgPaths) (_: null);
 
     clearParentPackages = packagePaths:
       concatMapStringsSep "\n" (package: ''
@@ -93,9 +90,10 @@
       goPackagePath: let
         modSrc = sources.${goPackagePath};
         pkgPath = escapeShellArg goPackagePath;
-        hasChildren = enclosing ? ${goPackagePath};
-        # The deepest declared ancestor; a path between the two need not be a module.
-        parentModule = lib.findFirst (path: sources ? ${path}) null ancestors.${goPackagePath};
+        hasChildren = allPrefixes ? ${goPackagePath};
+        # The deepest declared prefix; the paths between it and this module
+        # need not be modules.
+        parentModule = lib.findFirst (path: sources ? ${path}) null (prefixesOf goPackagePath);
         modulePackages = packages.${goPackagePath} or [];
       in ''
         pkg_path=${pkgPath}

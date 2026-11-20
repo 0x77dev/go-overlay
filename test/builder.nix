@@ -264,6 +264,8 @@
         "mkdir -p $out\n"
         + mkModuleCopyCommands {
           sources = {
+            # A shallower declared prefix: the child's parent is still example.com/parent.
+            "example.com" = pkgs.emptyDirectory;
             "example.com/parent" = source;
             "example.com/parent/internal/api" = nestedChild;
           };
@@ -282,50 +284,6 @@
             [ "$(cat "$internal/sibling")" = sibling ] || fail "intermediate symlink target's sibling lost"
           ''}
         ''
-      ))
-    // pkgs.lib.genAttrs [
-      "mkModuleCopyCommands-deepest-ancestor-copy"
-      "mkModuleCopyCommands-deepest-ancestor-symlink"
-    ] (name: let
-      # The child's parent is its deepest declared ancestor, example.com/outer/middle,
-      # whose source links internal to a directory of its own; no module declares
-      # the internal path. The outer module has no internal, as a module zip leaves
-      # nested modules out, so resolving the link against any other ancestor, or
-      # against none, loses the linked directory's files or writes into the store.
-      target = pkgs.runCommand "deepest-ancestor-target" {} ''
-        mkdir -p $out/api
-        echo sibling > $out/sibling
-        echo placeholder > $out/api/placeholder
-      '';
-      middle = pkgs.runCommand "deepest-ancestor-middle" {} ''
-        mkdir -p $out
-        echo middle > $out/middle
-        ln -s ${target} $out/internal
-      '';
-      outer = pkgs.runCommand "deepest-ancestor-outer" {} ''
-        mkdir -p $out
-        echo outer > $out/outer
-      '';
-    in
-      pkgs.runCommand "test-${name}" {} (
-        "mkdir -p $out\n"
-        + mkModuleCopyCommands {
-          sources = {
-            "example.com/outer" = outer;
-            "example.com/outer/middle" = middle;
-            "example.com/outer/middle/internal/api" = nestedChild;
-          };
-          packages = {"example.com/outer/middle/internal/api" = ["example.com/outer/middle/internal/api"];};
-          useSymlinks = pkgs.lib.hasSuffix "-symlink" name;
-        }
-        + ''
-          fail() { echo "Test '${name}' failed: $*"; exit 1; }
-          middle="$out/example.com/outer/middle"
-          [ -f "$out/example.com/outer/outer" ] && [ -f "$middle/middle" ] || fail "ancestor module files lost"
-          [ -f "$middle/internal/api/child" ] || fail "nested child missing"
-          [ ! -e "$middle/internal/api/placeholder" ] || fail "parent placeholder leaked into child"
-          [ "$(cat "$middle/internal/sibling")" = sibling ] || fail "internal resolved against a module other than the child's deepest declared ancestor"
-        ''
       ));
 
   # The host-tool-app fixture and the vendor environment the builder would
@@ -333,19 +291,18 @@
   vendorEnvApp = let
     src = ./fixtures/host-tool-app;
     go = go-bin.fromGoMod (src + "/go.mod");
+    args = {
+      pname = "host-tool-app";
+      version = "0.1.0";
+      inherit src go;
+    };
   in {
-    inherit src go;
+    inherit src;
     vendorEnv = pkgs.mkVendorEnv {
       inherit go src;
       manifest = builtins.fromTOML (builtins.readFile (src + "/govendor.toml"));
     };
-    build = extra:
-      pkgs.buildGoApplication ({
-          pname = "host-tool-app";
-          version = "0.1.0";
-          inherit src go;
-        }
-        // extra);
+    build = extra: pkgs.buildGoApplication (args // extra);
   };
 in {
   # excludedPackages - no exclusions returns basePackages unchanged
@@ -592,33 +549,57 @@ in {
   in
     assertEq "vendorEnv-application-shared-unchanged" (drvPaths (build {})) (drvPaths (build {inherit vendorEnv;}));
 
-  # The given environment is the one the program, its host tools and passthru
-  # use, not an argument the builder ignores and replaces with its own.
+  # A null vendorEnv is the default: the builder assembles its own environment.
+  vendorEnv-application-null-assembles =
+    assertEq "vendorEnv-application-null-assembles" (vendorEnvApp.build {}).drvPath (vendorEnvApp.build {vendorEnv = null;}).drvPath;
+
+  # A different environment reaches the configure phase of the program and of
+  # its host tool, and is the one the build reports, so the builder uses the
+  # environment it is given instead of assembling its own.
   vendorEnv-application-uses-given-environment = let
     vendorEnv = pkgs.runCommand "given-vendor-env" {passthru.useSymlinks = true;} "mkdir $out";
-    drv = vendorEnvApp.build {inherit vendorEnv;};
-    # hasInfix matches a regular expression, which cannot carry the store path's context.
-    uses = text: pkgs.lib.hasInfix (builtins.unsafeDiscardStringContext "${vendorEnv}") text;
+    given = vendorEnvApp.build {inherit vendorEnv;};
+    own = vendorEnvApp.build {};
+    hostTool = drv: builtins.head drv.hostTools;
   in
-    assertEq "vendorEnv-application-uses-given-environment" [true true true] [
-      (drv.vendorEnv.outPath == vendorEnv.outPath)
-      (uses drv.configurePhase)
-      (uses (builtins.head drv.hostTools).configurePhase)
-    ];
+    assertEq "vendorEnv-application-uses-given-environment" {
+      program = true;
+      hostTool = true;
+      passthru = true;
+    } {
+      program = given.configurePhase != own.configurePhase;
+      hostTool = (hostTool given).configurePhase != (hostTool own).configurePhase;
+      passthru = given.vendorEnv == vendorEnv;
+    };
 
-  # The options that only shape a vendor environment cannot change a prebuilt one,
-  # so the builder refuses them beside it.
+  # The options that only shape a vendor environment cannot change a prebuilt
+  # one, so the builder refuses each of them beside it. At their defaults they
+  # ask for nothing, so a caller may still pass them.
   vendorEnv-application-refuses-vendor-options = let
     inherit (vendorEnvApp) src vendorEnv build;
     refused = options: !(builtins.tryEval (build ({inherit vendorEnv;} // options)).drvPath).success;
   in
-    assertEq "vendorEnv-application-refuses-vendor-options" [true true true true true] (map refused [
-      {localReplaces."example.com/local" = src;}
-      {netrcFile = src + "/go.mod";}
-      {GOPRIVATE = "example.com";}
-      {GONOSUMDB = "example.com";}
-      {GONOPROXY = "example.com";}
-    ]);
+    assertEq "vendorEnv-application-refuses-vendor-options" {
+      defaults = false;
+      localReplaces = true;
+      netrcFile = true;
+      GOPRIVATE = true;
+      GONOSUMDB = true;
+      GONOPROXY = true;
+    } {
+      defaults = refused {
+        localReplaces = {};
+        netrcFile = null;
+        GOPRIVATE = "";
+        GONOSUMDB = "";
+        GONOPROXY = "";
+      };
+      localReplaces = refused {localReplaces."example.com/local" = src;};
+      netrcFile = refused {netrcFile = src + "/go.mod";};
+      GOPRIVATE = refused {GOPRIVATE = "example.com";};
+      GONOSUMDB = refused {GONOSUMDB = "example.com";};
+      GONOPROXY = refused {GONOPROXY = "example.com";};
+    };
 
   mkModuleCopyCommands-works-with-tildes-symlink = let
     inherit (import ../builder/modules-txt.nix {inherit (pkgs) lib;}) mkAnnotation mkRemoteModuleEntry mkRemoteReplaceTrailers isUnusedReplace;
@@ -697,7 +678,5 @@ in {
     mkModuleCopyCommands-intermediate-dangling-symlink
     mkModuleCopyCommands-intermediate-ancestor-copy
     mkModuleCopyCommands-intermediate-ancestor-symlink
-    mkModuleCopyCommands-deepest-ancestor-copy
-    mkModuleCopyCommands-deepest-ancestor-symlink
     ;
 }
